@@ -1,130 +1,139 @@
-#include "geometry_msgs/msg/twist.hpp"
-#include "rclcpp/rclcpp.hpp"
-#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
-#include "tf2_ros/buffer.h"
-#include "tf2_ros/transform_listener.h"
 #include <chrono>
+#include <cmath>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 #include <thread>
 
 class RobotChase : public rclcpp::Node {
 public:
-  RobotChase() : Node("robot_chase_node") {
+  RobotChase()
+      : Node("robot_chase_node"), tf_buffer_(this->get_clock()),
+        tf_listener_(tf_buffer_) {
+    // Publisher for Rick's velocity commands on the /rick/cmd_vel topic
+    velocity_publisher_ =
+        this->create_publisher<geometry_msgs::msg::Twist>("/rick/cmd_vel", 10);
 
-    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
-    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
+    // Introducing a small delay to ensure the TF listener has time to start
+    // receiving data
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    std::string robot_chaser = "rick";
-    std::string robot_chasee = "morty";
-    // Publishers and Subscribers
-    velocity_publisher_ = this->create_publisher<geometry_msgs::msg::Twist>(
-        robot_chaser + "/cmd_vel", 10);
+    // Timer to periodically call the update function every 100 milliseconds
+    timer_ = this->create_wall_timer(std::chrono::milliseconds(10),
+                                     std::bind(&RobotChase::update, this));
 
-    // Parameters
-    kp_distance_ = 0.1;             // Proportional gain for distance
-    kp_yaw_ = 0.4;                  // Proportional gain for yaw
-    min_linear_velocity_ = 0.3;     // Minimum linear velocity
-    min_angular_velocity_ = 0.3;    // Minimum angular velocity
-    min_distance_threshold_ = 0.60; // Minimum distance threshold
-    stopping_distance_threshold_ = 0.36;
+    // Control gains as specified
+    kp_yaw_ = 2.00;
+    kp_distance_ = 0.15;
 
-    // Timer
-    timer_ =
-        this->create_wall_timer(std::chrono::milliseconds(100),
-                                std::bind(&RobotChase::update_command, this));
+    // Initial debug statement
+    RCLCPP_INFO(this->get_logger(), "RobotChase node initialized.");
   }
 
 private:
-  void update_command() {
-    auto transform_opt = get_transform("morty/base_link", "rick/base_link");
-    if (!transform_opt) {
-      RCLCPP_WARN(this->get_logger(), "Could not get transform.");
+  void update() {
+    geometry_msgs::msg::TransformStamped transform_stamped;
+    try {
+      // Attempt to get the latest transform from Morty's base_link to Rick's
+      // base_link
+      transform_stamped = tf_buffer_.lookupTransform(
+          "rick/base_link", "morty/base_link", tf2::TimePointZero);
+      RCLCPP_INFO(this->get_logger(), "Transform received: x: %f, y: %f, z: %f",
+                  transform_stamped.transform.translation.x,
+                  transform_stamped.transform.translation.y,
+                  transform_stamped.transform.translation.z);
+    } catch (tf2::TransformException &ex) {
+      // If the transform is not available, log a warning and exit the function
+      RCLCPP_WARN(this->get_logger(), "Could not transform: %s", ex.what());
       return;
     }
 
-    auto &transform = *transform_opt;
-    double error_distance = sqrt(pow(transform.transform.translation.x, 2) +
-                                 pow(transform.transform.translation.y, 2));
-    // Print the error distance for debugging
+    // Relative position of Morty to Rick
+    double dx = transform_stamped.transform.translation.x;
+    double dy = transform_stamped.transform.translation.y;
+
+    RCLCPP_INFO(this->get_logger(), "Relative position: dx: %f, dy: %f", dx,
+                dy);
+
+    // Calculate the distance error between Rick and Morty
+    double error_distance = sqrt(dx * dx + dy * dy);
     RCLCPP_INFO(this->get_logger(), "Error Distance: %f", error_distance);
 
-    // Assuming a flat plane, yaw error is derived from quaternion to yaw
-    // conversion
-    tf2::Quaternion q(
-        transform.transform.rotation.x, transform.transform.rotation.y,
-        transform.transform.rotation.z, transform.transform.rotation.w);
-    double roll, pitch, yaw;
-    tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+    // Calculate the angular error (yaw) based on the relative position of Morty
+    // to Rick
+    double error_yaw = atan2(dy, dx);
 
-    // Print roll, pitch, and yaw values for debugging
-    RCLCPP_INFO(this->get_logger(), "Roll: %f, Pitch: %f, Yaw: %f", roll, pitch,
-                yaw);
+    // Normalize yaw error to the range [-pi, pi]
+    if (error_yaw > M_PI) {
+      error_yaw -= 2 * M_PI;
+    } else if (error_yaw < -M_PI) {
+      error_yaw += 2 * M_PI;
+    }
 
-    double error_yaw = atan2(transform.transform.translation.y,
-                             transform.transform.translation.x);
-    // Print the yaw error for debugging
-    RCLCPP_INFO(this->get_logger(), "Error Yaw: %f", error_yaw);
+    RCLCPP_INFO(this->get_logger(), "Error Yaw (radians): %f", error_yaw);
+    RCLCPP_INFO(this->get_logger(), "Error Yaw (degrees): %f",
+                error_yaw * 180.0 / M_PI);
 
-    // Create and publish the Twist message
-    geometry_msgs::msg::Twist cmd_vel;
+    // Calculate the linear and angular velocity commands using proportional
+    // control
+    double linear_velocity = kp_distance_ * error_distance;
+    double angular_velocity = kp_yaw_ * error_yaw;
 
-    if (error_distance <= stopping_distance_threshold_) {
-      // Stop the robot if it's closer than the stopping distance threshold
-      RCLCPP_INFO(this->get_logger(), "Morty was caught by Rick!!!");
-      RCLCPP_INFO(this->get_logger(), "Morty was caught by Rick!!!");
-      RCLCPP_INFO(this->get_logger(), "Morty was caught by Rick!!!");
-      RCLCPP_INFO(this->get_logger(), "Morty was caught by Rick!!!");
-      cmd_vel.linear.x = 0.0;
-      cmd_vel.angular.z = 0.0;
+    RCLCPP_INFO(this->get_logger(), "Calculated linear velocity: %f",
+                linear_velocity);
+    RCLCPP_INFO(this->get_logger(), "Calculated angular velocity: %f",
+                angular_velocity);
+
+    // Create a Twist message to send the velocity commands to Rick
+    double max_linear_velocity = 2.5;  // Max linear speed
+    double max_angular_velocity = 2.5; // Max angular speed
+
+    // Distance threshold to prevent collision
+    double stop_threshold = 0.60; // Stop if closer than 0.2 meters
+
+    if (error_distance < stop_threshold) {
+      linear_velocity = 0.0;
+      angular_velocity = 0.0;
+      RCLCPP_INFO(this->get_logger(), "Stopping: Too close to target.");
     } else {
-      // Compute velocities based on the error distance and yaw
-      cmd_vel.linear.x = kp_distance_ * error_distance;
-      cmd_vel.angular.z = kp_yaw_ * error_yaw;
-
-      // Ensure minimum velocities are considered
-      if (error_distance >= min_distance_threshold_) {
-        // Make sure linear velocity is at least the minimum linear velocity
-        cmd_vel.linear.x = std::copysign(
-            std::max(std::abs(cmd_vel.linear.x), min_linear_velocity_),
-            cmd_vel.linear.x);
-
-        // Make sure angular velocity is at least the minimum angular velocity
-        cmd_vel.angular.z = std::copysign(
-            std::max(std::abs(cmd_vel.angular.z), min_angular_velocity_),
-            cmd_vel.angular.z);
-      }
+      linear_velocity = std::max(std::min(linear_velocity, max_linear_velocity),
+                                 -max_linear_velocity);
+      angular_velocity =
+          std::max(std::min(angular_velocity, max_angular_velocity),
+                   -max_angular_velocity);
     }
 
-    velocity_publisher_->publish(cmd_vel);
+    auto twist_msg = geometry_msgs::msg::Twist();
+    twist_msg.linear.x = linear_velocity;
+    twist_msg.angular.z = angular_velocity;
 
-    // Print the command velocities being published
-    RCLCPP_INFO(this->get_logger(), "Publishing Linear X: %f, Angular Z: %f",
-                cmd_vel.linear.x, cmd_vel.angular.z);
+    // Publish the Twist message to the /rick/cmd_vel topic
+    velocity_publisher_->publish(twist_msg);
+
+    RCLCPP_INFO(this->get_logger(),
+                "Twist message published: linear.x = %f, angular.z = %f",
+                twist_msg.linear.x, twist_msg.angular.z);
   }
 
-  std::optional<geometry_msgs::msg::TransformStamped>
-  get_transform(const std::string &from_frame, const std::string &to_frame) {
-    try {
-      return tf_buffer_->lookupTransform(to_frame, from_frame,
-                                         tf2::TimePointZero);
-    } catch (tf2::TransformException &ex) {
-      RCLCPP_ERROR(this->get_logger(), "TF2 error: %s", ex.what());
-      return std::nullopt;
-    }
-  }
-
-  std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
-  std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
+  // Member variables
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr velocity_publisher_;
   rclcpp::TimerBase::SharedPtr timer_;
-  double kp_distance_, kp_yaw_;
-  double min_linear_velocity_, min_angular_velocity_, min_distance_threshold_,
-      stopping_distance_threshold_;
+  tf2_ros::Buffer tf_buffer_;
+  tf2_ros::TransformListener tf_listener_;
+
+  // Control gains as specified
+  double kp_yaw_;
+  double kp_distance_;
 };
 
 int main(int argc, char **argv) {
-  rclcpp::init(argc, argv);
-  auto node = std::make_shared<RobotChase>();
-  rclcpp::spin(node);
-  rclcpp::shutdown();
+  rclcpp::init(argc, argv); // Initialize the ROS2 client library
+  auto node = std::make_shared<RobotChase>(); // Create an instance of the
+                                              // RobotChase node
+  rclcpp::spin(node); // Keep the node running, processing callbacks and timers
+  rclcpp::shutdown(); // Shutdown the ROS2 client library when done
   return 0;
 }
