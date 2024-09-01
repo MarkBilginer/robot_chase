@@ -88,34 +88,39 @@ private:
                 angular_velocity);
 
     // Create a Twist message to send the velocity commands to Rick
-    double max_linear_velocity = 2.5;  // Max linear speed
-    double max_angular_velocity = 2.5; // Max angular speed
+    double max_linear_velocity = 2.0;  // Max linear speed
+    double max_angular_velocity = 2.0; // Max angular speed
 
     // Distance threshold to prevent collision
     double stop_threshold = 0.60; // Stop if closer than 0.2 meters
 
-    if (error_distance < stop_threshold) {
-      linear_velocity = 0.0;
-      angular_velocity = 0.0;
+    auto twist_msg = geometry_msgs::msg::Twist();
+
+    if (error_distance <= stop_threshold) {
+
+      // Calculate a deceleration factor based on how close the robot is to the
+      twist_msg.linear.x = 0.0;
+      twist_msg.angular.z = 0.0;
+
+      velocity_publisher_->publish(twist_msg);
       RCLCPP_INFO(this->get_logger(), "Stopping: Too close to target.");
-    } else {
-      linear_velocity = std::max(std::min(linear_velocity, max_linear_velocity),
-                                 -max_linear_velocity);
-      angular_velocity =
+      RCLCPP_INFO(this->get_logger(),
+                  "Twist message published: linear.x = %f, angular.z = %f",
+                  twist_msg.linear.x, twist_msg.angular.z);
+
+    } else if (error_distance > stop_threshold) {
+
+      twist_msg.linear.x = std::max(
+          std::min(linear_velocity, max_linear_velocity), -max_linear_velocity);
+      twist_msg.angular.z =
           std::max(std::min(angular_velocity, max_angular_velocity),
                    -max_angular_velocity);
+      velocity_publisher_->publish(twist_msg);
+
+      RCLCPP_INFO(this->get_logger(),
+                  "Twist message published: linear.x = %f, angular.z = %f",
+                  twist_msg.linear.x, twist_msg.angular.z);
     }
-
-    auto twist_msg = geometry_msgs::msg::Twist();
-    twist_msg.linear.x = linear_velocity;
-    twist_msg.angular.z = angular_velocity;
-
-    // Publish the Twist message to the /rick/cmd_vel topic
-    velocity_publisher_->publish(twist_msg);
-
-    RCLCPP_INFO(this->get_logger(),
-                "Twist message published: linear.x = %f, angular.z = %f",
-                twist_msg.linear.x, twist_msg.angular.z);
   }
 
   // Member variables
