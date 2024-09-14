@@ -92,7 +92,7 @@ private:
     double max_angular_velocity = 2.0; // Max angular speed
 
     // Distance threshold to prevent collision
-    double stop_threshold = 0.60; // Stop if closer than 0.2 meters
+    double stop_threshold = 0.36; // Stop if closer than 0.37 meters
 
     auto twist_msg = geometry_msgs::msg::Twist();
 
